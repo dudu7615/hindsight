@@ -11,10 +11,17 @@ def _retain_item(fake: FakeClient, index: int = 0) -> dict:
     return fake.retains[index]["items"][0]
 
 
+def _messages_of(fake: FakeClient, index: int = 0) -> list[dict]:
+    """The message dicts sent to Hindsight in one retain, in order. The payload is a
+    single flat JSON conversation array — ``[{"role","content","timestamp"}, ...]`` —
+    which is what the server's turn-aware chunker requires."""
+    return json.loads(_retain_item(fake, index)["content"])
+
+
 def _turns_of(fake: FakeClient, index: int = 0) -> list[list[str]]:
-    """Message texts per turn in one retain. Content is ``"[" + ",".join(turns) + "]"``
-    where each turn is itself a JSON array, so the whole payload is a list of turns."""
-    return [[m["content"] for m in turn] for turn in json.loads(_retain_item(fake, index)["content"])]
+    """Message texts per turn, regrouping the flat array into (user, assistant) pairs."""
+    texts = [m["content"] for m in _messages_of(fake, index)]
+    return [texts[i : i + 2] for i in range(0, len(texts), 2)]
 
 
 def test_sync_turn_retains_the_turn(provider):
@@ -29,8 +36,27 @@ def test_sync_turn_retains_the_turn(provider):
     item = _retain_item(fake)
     assert item["update_mode"] == "append"
     assert "hermes" in item["tags"] and "session:session-1" in item["tags"]
-    messages = json.loads(item["content"][1:-1])
+    messages = _messages_of(fake)
     assert [m["content"] for m in messages] == ["User: what is my name?", "Assistant: Ada."]
+
+
+def test_retain_ships_a_flat_conversation_array(provider):
+    """The retained payload must be one flat array of message dicts. The server's
+    turn-aware chunker only engages when every parsed element is a dict
+    (``fact_extraction.chunk_text``: ``all(isinstance(turn, dict) for turn in parsed)``);
+    a nested array — one array per turn, i.e. ``[[{...}], [{...}]]`` — fails that check
+    and silently degrades to sentence-based splitting, cutting a turn mid-sentence and
+    dropping the speaker boundary at the seam."""
+    instance, fake = provider({"retain_every_n_turns": 1})
+    instance.sync_turn("one", "1")
+    instance.sync_turn("two", "2")
+    instance.shutdown()
+
+    payload = json.loads(_retain_item(fake, 0)["content"])
+    assert isinstance(payload, list)
+    assert all(isinstance(msg, dict) for msg in payload)  # NOT a list of lists
+    assert [msg["content"] for msg in payload] == ["User: one", "Assistant: 1"]
+    assert all(set(msg) == {"role", "content", "timestamp"} for msg in payload)
 
 
 def test_retain_every_n_turns_buffers_then_ships_the_batch(provider):

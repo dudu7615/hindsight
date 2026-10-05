@@ -1404,7 +1404,16 @@ class HindsightMemoryProvider(MemoryProvider):
     ) -> Callable[[], None]:
         """Writer job shipping *turns* as one document. Inputs are snapshotted NOW: the
         writer runs after later sync_turn() calls mutate _session_turns/_turn_index/_session_id."""
-        content = "[" + ",".join(turns) + "]"
+        # Ship ONE flat JSON conversation array [{"role","content","timestamp"}, ...].
+        # Each entry in `turns` is json.dumps() of a single turn's [user, assistant]
+        # message list, so flatten them into one list before serializing. The server
+        # only takes its turn-aware chunking path when every element of the parsed
+        # array is a dict (fact_extraction.chunk_text:
+        # `all(isinstance(turn, dict) for turn in parsed)`). A nested array — one
+        # array per turn, i.e. [[{...}], [{...}]] — fails that check and silently
+        # degrades to sentence-based text splitting, which cuts a turn mid-sentence
+        # and drops the speaker boundary at the seam.
+        content = json.dumps([msg for turn in turns for msg in json.loads(turn)], ensure_ascii=False)
         metadata = self._build_metadata(message_count=len(turns) * 2, turn_index=self._turn_index)
         lineage = (("session", self._session_id), ("parent", self._parent_session_id))
         tags = [f"{kind}:{sid}" for kind, sid in lineage if sid] or None
