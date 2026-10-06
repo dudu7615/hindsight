@@ -33,7 +33,12 @@ def _get_secret(name: str, default: str = "") -> str:
 
 
 class MemoryProvider:  # the Hermes base class, reduced to what the plugin overrides
-    pass
+    def on_session_end(self, messages=None) -> None:
+        """Base no-op hook (agent/memory_provider.py:165). Hermes calls this at real
+        session boundaries (CLI exit, desktop finalize, gateway shutdown) and a provider
+        that does not override it inherits the no-op — so a test that asserts a flush
+        must be exercising the provider's override, not this base."""
+
 
 
 @dataclass

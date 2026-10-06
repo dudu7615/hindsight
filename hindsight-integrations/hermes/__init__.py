@@ -1623,6 +1623,47 @@ class HindsightMemoryProvider(MemoryProvider):
             self._document_id,
         )
 
+    def on_session_end(self, messages: List[Dict[str, Any]] | None = None) -> None:
+        """Flush turns buffered below the ``retain_every_n_turns`` boundary.
+
+        ``sync_turn`` only enqueues at the modulo boundary, so a real session boundary
+        has to drain whatever is left. The base hook is a no-op and ``shutdown()`` only
+        drains jobs already on the writer queue, so without this override the trailing
+        turns of a short session vanish with no error on CLI exit, TUI/desktop finalize,
+        gateway shutdown and cached-agent eviction. See hermes-agent#36216 / #88944.
+
+        The buffer is cleared once the flush is queued, mirroring ``on_session_switch``:
+        an immediately following switch hook (CLI ``/new`` runs end→switch as one task)
+        then sees an empty buffer instead of re-shipping the same turns, which on an
+        append-capable API would duplicate the payload (#41911). A flush whose job fails
+        is still lost — the buffer is in memory either way — so this narrows the window
+        rather than closing it.
+        """
+        if not self._auto_retain or self._shutting_down.is_set() or not self._session_turns:
+            return
+        document_id, update_mode = self._resolve_retain_target(self._document_id)
+        start = self._last_retained_turn_count if update_mode == "append" else 0
+        turns_to_retain = self._session_turns[start:]
+        if not turns_to_retain:
+            return
+        logger.debug(
+            "on_session_end: flushing %d/%d buffered turns, doc=%s, mode=%s",
+            len(turns_to_retain),
+            len(self._session_turns),
+            document_id,
+            update_mode,
+        )
+        self._enqueue_retain(
+            self._make_turn_retain_job(
+                turns_to_retain,
+                document_id=document_id,
+                update_mode=update_mode,
+                label="flush-on-session-end",
+            )
+        )
+        self._session_turns = []
+        self._turn_counter = self._turn_index = self._last_retained_turn_count = 0
+
     def _close_client(self) -> None:
         """Both modes now hold a plain ``hindsight_client.Hindsight``, so one aclose on the
         shared loop is the whole story. The old local_embedded branch existed because
